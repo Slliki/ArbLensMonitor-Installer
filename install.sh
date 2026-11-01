@@ -50,6 +50,7 @@ umask 077
   printf 'GATE_CROSSEX_SECRET=%q\n' "$GATE_CROSSEX_SECRET"
   printf 'PUBLIC_DOMAIN=%q\n' "$PUBLIC_DOMAIN"
 } > "$SETTINGS"
+umask 022
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -62,6 +63,7 @@ fi
 if ! id arblens >/dev/null 2>&1; then
   useradd --system --home-dir "$APP_ROOT" --shell /usr/sbin/nologin arblens
 fi
+install -d -o arblens -g arblens -m 750 "$DATA_ROOT/home" "$DATA_ROOT/home/.config" "$DATA_ROOT/wrangler-logs"
 
 STAMP=$(date -u +%Y%m%d%H%M%S)
 RELEASE="$APP_ROOT/releases/$STAMP"
@@ -123,6 +125,26 @@ done
 EOF
 chmod 755 /usr/local/bin/arblens-monitor-loop
 
+cat > /usr/local/bin/arblens-health-watchdog <<'EOF'
+#!/usr/bin/env bash
+set -u
+failures=0
+while true; do
+  sleep 30
+  if curl -fsS --max-time 8 http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
+    failures=0
+    continue
+  fi
+  failures=$((failures + 1))
+  if (( failures < 2 )); then continue; fi
+  logger -t arblens-watchdog "health check failed twice; restarting arblens-web"
+  systemctl restart arblens-web
+  failures=0
+  sleep 15
+done
+EOF
+chmod 755 /usr/local/bin/arblens-health-watchdog
+
 cat > /etc/systemd/system/arblens-web.service <<'EOF'
 [Unit]
 Description=ArbLens web and API service
@@ -143,10 +165,39 @@ ExecStart=/opt/arblens/current/node_modules/.bin/wrangler dev --config wrangler.
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
+KillMode=control-group
+OOMPolicy=kill
+MemoryAccounting=true
+MemoryMax=1400M
+MemorySwapMax=512M
+RuntimeMaxSec=6h
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+cat > /etc/systemd/system/arblens-watchdog.service <<'EOF'
+[Unit]
+Description=ArbLens HTTP health watchdog
+After=arblens-web.service
+Requires=arblens-web.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/arblens-health-watchdog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/tmpfiles.d/arblens.conf <<'EOF'
+d /var/lib/arblens/home 0750 arblens arblens 7d
+d /var/lib/arblens/home/.config 0750 arblens arblens 7d
+d /var/lib/arblens/wrangler-logs 0750 arblens arblens 7d
+EOF
+systemd-tmpfiles --create --clean /etc/tmpfiles.d/arblens.conf
 
 cat > /etc/systemd/system/arblens-monitor.service <<'EOF'
 [Unit]
@@ -188,8 +239,8 @@ ln -sfn /etc/nginx/sites-available/arblens /etc/nginx/sites-enabled/arblens
 nginx -t
 
 systemctl daemon-reload
-systemctl enable --now arblens-web arblens-monitor nginx
-systemctl restart arblens-web arblens-monitor nginx
+systemctl enable --now arblens-web arblens-monitor arblens-watchdog nginx
+systemctl restart arblens-web arblens-monitor arblens-watchdog nginx
 
 for _ in $(seq 1 40); do
   if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then break; fi
@@ -205,8 +256,8 @@ if ! curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
   exit 1
 fi
 
-# Keep only the three newest immutable releases. Persistent data is elsewhere.
-mapfile -t OLD_RELEASES < <(find "$APP_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2-)
+# Keep only the two newest immutable releases. Persistent data is elsewhere.
+mapfile -t OLD_RELEASES < <(find "$APP_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2-)
 for old in "${OLD_RELEASES[@]:-}"; do
   [[ "$old" == "$APP_ROOT/releases/"* && "$old" != "$RELEASE" ]] && rm -rf -- "$old"
 done
@@ -226,5 +277,5 @@ fi
 echo ""
 echo "ArbLens 已安装并开始 3 秒持续采集。"
 echo "访问地址：$URL"
-echo "状态检查：systemctl status arblens-web arblens-monitor"
+echo "状态检查：systemctl status arblens-web arblens-monitor arblens-watchdog"
 echo "再次运行同一条安装命令即可无损升级，历史数据保存在 $DATA_ROOT。"

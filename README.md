@@ -26,7 +26,10 @@ curl -fsSL https://raw.githubusercontent.com/Slliki/ArbLensMonitor-Installer/mai
 - 每 3 秒执行一次的后台行情监控和报警检查
 - Nginx 反向代理
 - `systemd` 开机自启与异常自动重启
+- HTTP 健康看门狗、内存上限和定时安全重启，适配 2 GB 云服务器
 - 本地持久化的趋势历史、报警日志和用户设置
+
+趋势数据采用分级聚合：最近 30 分钟保留 10 秒桶，24 小时内保留 1 分钟桶，7 天内保留 5 分钟桶，30 天内保留 30 分钟桶。每个桶记录平均值和区间高低值，在保留短时价差突变信息的同时控制数据库体积。
 
 安装完成后，终端会显示访问地址，通常为：
 
@@ -56,11 +59,11 @@ Gate API Key 和 Secret 为可选项，但 Gate CrossEx 行情可能需要配置
 ## 检查服务状态
 
 ```bash
-sudo systemctl is-active arblens-web arblens-monitor nginx
+sudo systemctl is-active arblens-web arblens-monitor arblens-watchdog nginx
 curl -fsS http://127.0.0.1:3000/api/health
 ```
 
-三个服务应返回 `active`，健康接口应返回成功结果。
+四个服务应返回 `active`，健康接口应返回成功结果。看门狗会在健康接口连续失败时自动重启 Web 服务。
 
 实时查看日志：
 
@@ -80,13 +83,14 @@ sudo journalctl -u arblens-monitor -f
 | `/etc/arblens/runtime.env` | 运行时环境变量 |
 | `/etc/systemd/system/arblens-web.service` | Web 服务定义 |
 | `/etc/systemd/system/arblens-monitor.service` | 后台监控服务定义 |
+| `/etc/systemd/system/arblens-watchdog.service` | HTTP 健康检查和自动恢复服务 |
 
 ## 502 Bad Gateway 排查
 
 先执行：
 
 ```bash
-sudo systemctl status arblens-web arblens-monitor nginx --no-pager -l
+sudo systemctl status arblens-web arblens-monitor arblens-watchdog nginx --no-pager -l
 sudo journalctl -u arblens-web -n 100 --no-pager
 sudo nginx -t
 curl -v http://127.0.0.1:3000/api/health
@@ -111,4 +115,3 @@ sudo systemctl restart arblens-web arblens-monitor nginx
 安装器默认使用最新稳定 Release：
 
 [查看 ArbLensMonitor-Installer Releases](https://github.com/Slliki/ArbLensMonitor-Installer/releases)
-
