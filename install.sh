@@ -64,6 +64,10 @@ if ! id arblens >/dev/null 2>&1; then
   useradd --system --home-dir "$APP_ROOT" --shell /usr/sbin/nologin arblens
 fi
 install -d -o arblens -g arblens -m 750 "$DATA_ROOT/home" "$DATA_ROOT/home/.config" "$DATA_ROOT/wrangler-logs"
+# Wrangler file logs are diagnostic-only and previously grew by multiple GB
+# per day. Journald remains available for service errors, so remove only these
+# generated log files while preserving the D1 trend database.
+find "$DATA_ROOT/wrangler-logs" -maxdepth 1 -type f -name 'wrangler-*.log' -delete
 
 STAMP=$(date -u +%Y%m%d%H%M%S)
 RELEASE="$APP_ROOT/releases/$STAMP"
@@ -157,10 +161,9 @@ User=arblens
 Group=arblens
 WorkingDirectory=/opt/arblens/current/dist/server
 Environment=WRANGLER_SEND_METRICS=false
-Environment=WRANGLER_LOG=warn
+Environment=WRANGLER_LOG=none
 Environment=HOME=/var/lib/arblens/home
 Environment=XDG_CONFIG_HOME=/var/lib/arblens/home/.config
-Environment=WRANGLER_LOG_PATH=/var/lib/arblens/wrangler-logs
 ExecStart=/opt/arblens/current/node_modules/.bin/wrangler dev --config wrangler.local.json --persist-to /var/lib/arblens --ip 127.0.0.1 --port 3000 --local --no-show-interactive-dev-session
 Restart=always
 RestartSec=3
@@ -195,7 +198,7 @@ EOF
 cat > /etc/tmpfiles.d/arblens.conf <<'EOF'
 d /var/lib/arblens/home 0750 arblens arblens 7d
 d /var/lib/arblens/home/.config 0750 arblens arblens 7d
-d /var/lib/arblens/wrangler-logs 0750 arblens arblens 7d
+d /var/lib/arblens/wrangler-logs 0750 arblens arblens 1d
 EOF
 systemd-tmpfiles --create --clean /etc/tmpfiles.d/arblens.conf
 
