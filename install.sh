@@ -131,7 +131,16 @@ source /etc/arblens/runtime.env
   done
 ) &
 maintenance_pid=$!
-trap 'kill "$maintenance_pid" 2>/dev/null || true' EXIT
+(
+  while true; do
+    sleep 3
+    curl -fsS --max-time 120 -X POST \
+      -H "Authorization: Bearer ${MONITOR_TOKEN}" \
+      'http://127.0.0.1:3000/api/monitor/tick?phase=alerts' >/dev/null || echo "ArbLens alert evaluation failed" >&2
+  done
+) &
+alerts_pid=$!
+trap 'kill "$maintenance_pid" "$alerts_pid" 2>/dev/null || true' EXIT
 while true; do
   started=$SECONDS
   curl -fsS --max-time 120 -X POST \
@@ -177,7 +186,10 @@ User=arblens
 Group=arblens
 WorkingDirectory=/opt/arblens/current/dist/server
 Environment=WRANGLER_SEND_METRICS=false
-Environment=WRANGLER_LOG=none
+Environment=WRANGLER_LOG=error
+Environment=WRANGLER_WRITE_LOGS=false
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=50
 Environment=HOME=/var/lib/arblens/home
 Environment=XDG_CONFIG_HOME=/var/lib/arblens/home/.config
 ExecStart=/opt/arblens/current/node_modules/.bin/wrangler dev --config wrangler.local.json --persist-to /var/lib/arblens --ip 127.0.0.1 --port 3000 --local --no-show-interactive-dev-session
