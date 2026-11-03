@@ -15,7 +15,7 @@ fi
 echo ""
 echo "ArbLens Monitor 一键安装 / 升级"
 echo "--------------------------------"
-echo "将安装网页、持久化历史数据库、3 秒后台采集和飞书报警服务。"
+echo "将安装网页、持久化历史数据库、10 秒后台采集和飞书报警服务。"
 echo ""
 
 mkdir -p "$APP_ROOT/releases" "$DATA_ROOT/home/.config" "$DATA_ROOT/wrangler-logs" "$CONFIG_ROOT"
@@ -120,6 +120,8 @@ cat > /usr/local/bin/arblens-monitor-loop <<'EOF'
 #!/usr/bin/env bash
 set -u
 source /etc/arblens/runtime.env
+# Wait for the HTTP runtime after boot/upgrade rather than issuing failed ticks.
+until curl -fsS --max-time 3 http://127.0.0.1:3000/api/health >/dev/null 2>&1; do sleep 3; done
 # Maintenance is separately scheduled, bounded in SQL, and never awaited by
 # the sampling loop. Both children are stopped by systemd with this service.
 (
@@ -133,7 +135,7 @@ source /etc/arblens/runtime.env
 maintenance_pid=$!
 (
   while true; do
-    sleep 3
+    sleep 10
     curl -fsS --max-time 120 -X POST \
       -H "Authorization: Bearer ${MONITOR_TOKEN}" \
       'http://127.0.0.1:3000/api/monitor/tick?phase=alerts' >/dev/null || echo "ArbLens alert evaluation failed" >&2
@@ -148,7 +150,7 @@ while true; do
     http://127.0.0.1:3000/api/monitor/tick >/dev/null || echo "ArbLens sampling failed; inspect arblens-web logs" >&2
   elapsed=$((SECONDS - started))
   if (( elapsed >= 10 )); then echo "ArbLens slow sampling tick: ${elapsed}s" >&2; fi
-  delay=$((3 - elapsed))
+  delay=$((10 - elapsed))
   if (( delay > 0 )); then sleep "$delay"; else sleep 0.2; fi
 done
 EOF
@@ -201,7 +203,7 @@ OOMPolicy=kill
 MemoryAccounting=true
 MemoryMax=1400M
 MemorySwapMax=512M
-RuntimeMaxSec=6h
+RuntimeMaxSec=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -232,7 +234,7 @@ systemd-tmpfiles --create --clean /etc/tmpfiles.d/arblens.conf
 
 cat > /etc/systemd/system/arblens-monitor.service <<'EOF'
 [Unit]
-Description=ArbLens 3-second market collector and alert monitor
+Description=ArbLens 10-second market collector and alert monitor
 After=arblens-web.service
 Requires=arblens-web.service
 
@@ -306,7 +308,7 @@ else
   URL="http://$PUBLIC_IP/live"
 fi
 echo ""
-echo "ArbLens 已安装并开始 3 秒持续采集。"
+echo "ArbLens 已安装并开始 10 秒持续采集。"
 echo "访问地址：$URL"
 echo "状态检查：systemctl status arblens-web arblens-monitor arblens-watchdog"
 echo "再次运行同一条安装命令即可无损升级，历史数据保存在 $DATA_ROOT。"

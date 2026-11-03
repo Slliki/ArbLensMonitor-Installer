@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/Slliki/ArbLensMonitor-Installer/mai
 ## 安装内容
 
 - ArbLens Web 页面与 API
-- 每 3 秒执行一次的后台行情监控和报警检查
+- 目标每 10 秒执行一次的后台行情采集；报警和历史压缩独立调度，慢请求不阻塞下一轮采集
 - Nginx 反向代理
 - `systemd` 开机自启与异常自动重启
 - HTTP 健康看门狗、内存上限和定时安全重启，适配 2 GB 云服务器
