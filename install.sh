@@ -120,11 +120,27 @@ cat > /usr/local/bin/arblens-monitor-loop <<'EOF'
 #!/usr/bin/env bash
 set -u
 source /etc/arblens/runtime.env
+# Maintenance is separately scheduled, bounded in SQL, and never awaited by
+# the sampling loop. Both children are stopped by systemd with this service.
+(
+  while true; do
+    sleep 30
+    curl -fsS --max-time 60 -X POST \
+      -H "Authorization: Bearer ${MONITOR_TOKEN}" \
+      http://127.0.0.1:3000/api/monitor/maintenance >/dev/null || echo "ArbLens history maintenance failed" >&2
+  done
+) &
+maintenance_pid=$!
+trap 'kill "$maintenance_pid" 2>/dev/null || true' EXIT
 while true; do
+  started=$SECONDS
   curl -fsS --max-time 120 -X POST \
     -H "Authorization: Bearer ${MONITOR_TOKEN}" \
-    http://127.0.0.1:3000/api/monitor/tick >/dev/null || true
-  sleep 3
+    http://127.0.0.1:3000/api/monitor/tick >/dev/null || echo "ArbLens sampling failed; inspect arblens-web logs" >&2
+  elapsed=$((SECONDS - started))
+  if (( elapsed >= 10 )); then echo "ArbLens slow sampling tick: ${elapsed}s" >&2; fi
+  delay=$((3 - elapsed))
+  if (( delay > 0 )); then sleep "$delay"; else sleep 0.2; fi
 done
 EOF
 chmod 755 /usr/local/bin/arblens-monitor-loop
