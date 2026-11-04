@@ -12,6 +12,8 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "请使用 sudo 运行此安装器。" >&2
   exit 1
 fi
+exec 9>/run/lock/arblens-install.lock
+flock -n 9 || { echo "另一个 ArbLens 安装或更新正在进行，请等待完成。" >&2; exit 1; }
 echo ""
 echo "ArbLens Monitor 一键安装 / 升级"
 echo "--------------------------------"
@@ -29,14 +31,14 @@ GATE_CROSSEX_KEY=${GATE_CROSSEX_KEY:-}
 GATE_CROSSEX_SECRET=${GATE_CROSSEX_SECRET:-}
 PUBLIC_DOMAIN=${PUBLIC_DOMAIN:-}
 
-if [[ -r /dev/tty && -z "$GATE_CROSSEX_KEY" ]]; then
+if [[ ${ARBLENS_NONINTERACTIVE:-0} != 1 && -r /dev/tty && -z "$GATE_CROSSEX_KEY" ]]; then
   read -r -p "Gate API Key（只读；可暂时留空）: " GATE_CROSSEX_KEY </dev/tty
 fi
-if [[ -r /dev/tty && -n "$GATE_CROSSEX_KEY" && -z "$GATE_CROSSEX_SECRET" ]]; then
+if [[ ${ARBLENS_NONINTERACTIVE:-0} != 1 && -r /dev/tty && -n "$GATE_CROSSEX_KEY" && -z "$GATE_CROSSEX_SECRET" ]]; then
   read -r -s -p "Gate API Secret（输入不显示）: " GATE_CROSSEX_SECRET </dev/tty
   echo ""
 fi
-if [[ -r /dev/tty && -z "$PUBLIC_DOMAIN" ]]; then
+if [[ ${ARBLENS_NONINTERACTIVE:-0} != 1 && -r /dev/tty && -z "$PUBLIC_DOMAIN" ]]; then
   read -r -p "已解析到本服务器的域名（没有可直接回车，先使用公网 IP）: " PUBLIC_DOMAIN </dev/tty
 fi
 if [[ -n "$PUBLIC_DOMAIN" && ! "$PUBLIC_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
@@ -73,24 +75,71 @@ STAMP=$(date -u +%Y%m%d%H%M%S)
 RELEASE="$APP_ROOT/releases/$STAMP"
 PREVIOUS_RELEASE=$(readlink -f "$APP_ROOT/current" 2>/dev/null || true)
 ARCHIVE=$(mktemp /tmp/arblens.XXXXXX.tar.gz)
-cleanup() { rm -f "$ARCHIVE"; }
+SUMS=$(mktemp /tmp/arblens-sums.XXXXXX)
+NGINX_BACKUP=$(mktemp /tmp/arblens-nginx.XXXXXX)
+UPDATER_BACKUP=$(mktemp /tmp/arblens-updater.XXXXXX)
+UPDATER_UNIT_BACKUP=$(mktemp /tmp/arblens-updater-unit.XXXXXX)
+if [[ -f /etc/nginx/sites-available/arblens ]]; then cp /etc/nginx/sites-available/arblens "$NGINX_BACKUP"; fi
+if [[ -f /usr/local/lib/arblens-updater.py ]]; then cp /usr/local/lib/arblens-updater.py "$UPDATER_BACKUP"; fi
+if [[ -f /etc/systemd/system/arblens-updater.service ]]; then cp /etc/systemd/system/arblens-updater.service "$UPDATER_UNIT_BACKUP"; fi
+RELEASE_ACTIVATED=0
+cleanup() { rm -f "$ARCHIVE" "$SUMS" "$NGINX_BACKUP" "$UPDATER_BACKUP" "$UPDATER_UNIT_BACKUP"; }
 trap cleanup EXIT
+rollback_release() {
+  if [[ "$RELEASE_ACTIVATED" == 1 && -n "$PREVIOUS_RELEASE" && -d "$PREVIOUS_RELEASE" && "$PREVIOUS_RELEASE" == "$APP_ROOT/releases/"* ]]; then
+    echo "更新未完成，正在恢复上一代码版本……" >&2
+    ln -sfn "$PREVIOUS_RELEASE" "$APP_ROOT/current"
+    systemctl restart arblens-web arblens-monitor || true
+    if [[ -s "$UPDATER_BACKUP" && -s "$UPDATER_UNIT_BACKUP" ]]; then
+      install -m 755 "$UPDATER_BACKUP" /usr/local/lib/arblens-updater.py
+      install -m 644 "$UPDATER_UNIT_BACKUP" /etc/systemd/system/arblens-updater.service
+      systemctl daemon-reload
+      systemctl restart arblens-updater || true
+    fi
+    if [[ -s "$NGINX_BACKUP" ]]; then
+      install -m 644 "$NGINX_BACKUP" /etc/nginx/sites-available/arblens
+      nginx -t && systemctl reload nginx || true
+    fi
+  fi
+}
+trap rollback_release ERR
+
+# Resolve latest exactly once. Web updates pass an explicit stable tag so a
+# concurrent GitHub release cannot change the archive halfway through install.
+RELEASE_TAG=${ARBLENS_RELEASE_TAG:-}
+if [[ -z "$RELEASE_TAG" ]]; then
+  RELEASE_TAG=$(curl -fsSL --max-time 40 --retry 2 "https://api.github.com/repos/$RELEASE_REPO/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+fi
+[[ "$RELEASE_TAG" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{1,6}$ ]] || { echo "发布版本格式无效。" >&2; exit 1; }
+DOWNLOAD_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
 
 HTTP_CODE=$(curl -sS -L --retry 3 --retry-all-errors -o "$ARCHIVE" -w '%{http_code}' \
-  "https://github.com/$RELEASE_REPO/releases/latest/download/$RELEASE_ASSET")
+  "$DOWNLOAD_BASE/$RELEASE_ASSET")
 if [[ "$HTTP_CODE" != "200" ]]; then
   echo "下载 ArbLens 公共安装包失败（HTTP $HTTP_CODE），请稍后重试。" >&2
   exit 1
 fi
+EXPECTED_SHA=${ARBLENS_EXPECTED_SHA256:-}
+if [[ -z "$EXPECTED_SHA" ]]; then
+  curl -fsSL --max-time 40 --retry 2 "$DOWNLOAD_BASE/SHA256SUMS" -o "$SUMS"
+  EXPECTED_SHA=$(awk '$2=="arblens-source.tar.gz" {print $1}' "$SUMS")
+fi
+[[ "$EXPECTED_SHA" =~ ^[a-f0-9]{64}$ ]] || { echo "发布包缺少有效 SHA256 校验值。" >&2; exit 1; }
+ACTUAL_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+[[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]] || { echo "发布包 SHA256 校验失败，未切换运行版本。" >&2; exit 1; }
 tar -tzf "$ARCHIVE" >/dev/null || { echo "安装包校验失败。" >&2; exit 1; }
 
 mkdir -p "$RELEASE"
 tar -xzf "$ARCHIVE" -C "$RELEASE"
 cd "$RELEASE"
+printf '%s\n' "$RELEASE_TAG" > ARBLENS_VERSION
 npm ci --no-audit --no-fund
 npm run build
 
-MONITOR_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')
+# Preserve this token so rollback still matches the previous runtime config.
+MONITOR_TOKEN=""
+if [[ -f "$CONFIG_ROOT/runtime.env" ]]; then source "$CONFIG_ROOT/runtime.env"; fi
+MONITOR_TOKEN=${MONITOR_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')}
 export MONITOR_TOKEN GATE_CROSSEX_KEY GATE_CROSSEX_SECRET
 python3 - <<'PY'
 import json, os
@@ -109,6 +158,41 @@ PY
 chmod 600 "$RELEASE/dist/server/wrangler.local.json"
 chown -R arblens:arblens "$RELEASE" "$DATA_ROOT"
 ln -sfn "$RELEASE" "$APP_ROOT/current"
+RELEASE_ACTIVATED=1
+
+install -d -m 700 -o root -g root /var/lib/arblens-updater
+install -m 755 -o root -g root "$RELEASE/deploy/updater.py" /usr/local/lib/arblens-updater.py
+NEW_UPDATE_KEY=0
+if [[ ! -s "$CONFIG_ROOT/update.key" ]] || [[ $(wc -c < "$CONFIG_ROOT/update.key") -lt 33 ]]; then
+  (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(36))' > "$CONFIG_ROOT/update.key")
+  NEW_UPDATE_KEY=1
+fi
+chown root:root "$CONFIG_ROOT/update.key"
+chmod 600 "$CONFIG_ROOT/update.key"
+cat > /etc/systemd/system/arblens-updater.service <<'EOF'
+[Unit]
+Description=ArbLens per-instance release updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/arblens-updater.py
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/arblens-updater
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 cat > "$CONFIG_ROOT/runtime.env" <<EOF
 MONITOR_TOKEN=$MONITOR_TOKEN
@@ -257,6 +341,16 @@ server {
     listen [::]:80 default_server;
     server_name $SERVER_NAME;
     client_max_body_size 2m;
+    location ^~ /api/system/update/ {
+        proxy_pass http://127.0.0.1:3031;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Authorization \$http_authorization;
+        proxy_read_timeout 70s;
+        client_max_body_size 4k;
+    }
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
@@ -272,18 +366,21 @@ ln -sfn /etc/nginx/sites-available/arblens /etc/nginx/sites-enabled/arblens
 nginx -t
 
 systemctl daemon-reload
-systemctl enable --now arblens-web arblens-monitor arblens-watchdog nginx
-systemctl restart arblens-web arblens-monitor arblens-watchdog nginx
+systemctl enable --now arblens-web arblens-monitor arblens-watchdog arblens-updater nginx
+systemctl restart arblens-web arblens-monitor arblens-watchdog arblens-updater nginx
 
+healthy() {
+  curl -fsS --max-time 3 http://127.0.0.1:3000/api/health >/dev/null 2>&1 &&
+  curl -fsS --max-time 3 http://127.0.0.1:3031/api/system/update/status 2>/dev/null | python3 -c 'import json,sys; assert json.load(sys.stdin).get("supported") is True' >/dev/null 2>&1
+}
 for _ in $(seq 1 40); do
-  if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then break; fi
+  if healthy; then break; fi
   sleep 2
 done
-if ! curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
+if ! healthy; then
   if [[ -n "$PREVIOUS_RELEASE" && -d "$PREVIOUS_RELEASE" && "$PREVIOUS_RELEASE" == "$APP_ROOT/releases/"* ]]; then
     echo "新版本未通过健康检查，正在自动回滚到上一版本……" >&2
-    ln -sfn "$PREVIOUS_RELEASE" "$APP_ROOT/current"
-    systemctl restart arblens-web arblens-monitor
+    rollback_release
   fi
   echo "服务未能通过健康检查；已执行自动回滚。诊断命令：journalctl -u arblens-web -n 100 --no-pager" >&2
   exit 1
@@ -292,7 +389,7 @@ fi
 # Keep only the two newest immutable releases. Persistent data is elsewhere.
 mapfile -t OLD_RELEASES < <(find "$APP_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2-)
 for old in "${OLD_RELEASES[@]:-}"; do
-  [[ "$old" == "$APP_ROOT/releases/"* && "$old" != "$RELEASE" ]] && rm -rf -- "$old"
+  [[ "$old" == "$APP_ROOT/releases/"* && "$old" != "$RELEASE" && "$old" != "$PREVIOUS_RELEASE" ]] && rm -rf -- "$old"
 done
 
 PUBLIC_IP=$(curl -4 -fsS --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')
@@ -312,3 +409,11 @@ echo "ArbLens 已安装并开始 10 秒持续采集。"
 echo "访问地址：$URL"
 echo "状态检查：systemctl status arblens-web arblens-monitor arblens-watchdog"
 echo "再次运行同一条安装命令即可无损升级，历史数据保存在 $DATA_ROOT。"
+echo "当前版本：$RELEASE_TAG；后续可在网页‘版本更新’中检查并升级。"
+if [[ "$NEW_UPDATE_KEY" == 1 ]]; then
+  echo "本机更新管理密钥（请妥善保存，不要公开或发送到聊天）："
+  cat "$CONFIG_ROOT/update.key"
+else
+  echo "更新管理密钥保持不变；忘记时可运行：sudo cat /etc/arblens/update.key"
+fi
+RELEASE_ACTIVATED=0
