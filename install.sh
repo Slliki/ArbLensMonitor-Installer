@@ -30,6 +30,8 @@ fi
 GATE_CROSSEX_KEY=${GATE_CROSSEX_KEY:-}
 GATE_CROSSEX_SECRET=${GATE_CROSSEX_SECRET:-}
 PUBLIC_DOMAIN=${PUBLIC_DOMAIN:-}
+ENABLE_ANTHROPIC_BACKFILL=${ENABLE_ANTHROPIC_BACKFILL:-1}
+[[ "$ENABLE_ANTHROPIC_BACKFILL" == 0 ]] || ENABLE_ANTHROPIC_BACKFILL=1
 
 if [[ ${ARBLENS_NONINTERACTIVE:-0} != 1 && -r /dev/tty && -z "$GATE_CROSSEX_KEY" ]]; then
   read -r -p "Gate API Key（只读；可暂时留空）: " GATE_CROSSEX_KEY </dev/tty
@@ -51,6 +53,7 @@ umask 077
   printf 'GATE_CROSSEX_KEY=%q\n' "$GATE_CROSSEX_KEY"
   printf 'GATE_CROSSEX_SECRET=%q\n' "$GATE_CROSSEX_SECRET"
   printf 'PUBLIC_DOMAIN=%q\n' "$PUBLIC_DOMAIN"
+  printf 'ENABLE_ANTHROPIC_BACKFILL=%q\n' "$ENABLE_ANTHROPIC_BACKFILL"
 } > "$SETTINGS"
 umask 022
 
@@ -140,7 +143,7 @@ npm run build
 MONITOR_TOKEN=""
 if [[ -f "$CONFIG_ROOT/runtime.env" ]]; then source "$CONFIG_ROOT/runtime.env"; fi
 MONITOR_TOKEN=${MONITOR_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')}
-export MONITOR_TOKEN GATE_CROSSEX_KEY GATE_CROSSEX_SECRET
+export MONITOR_TOKEN GATE_CROSSEX_KEY GATE_CROSSEX_SECRET ENABLE_ANTHROPIC_BACKFILL
 python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -150,6 +153,7 @@ d["vars"] = {
     "MONITOR_TOKEN": os.environ["MONITOR_TOKEN"],
     "MONITOR_MIN_VOLUME": "100000",
     "ENABLE_SERVER_BITGET": "1",
+    "ENABLE_ANTHROPIC_BACKFILL": os.environ.get("ENABLE_ANTHROPIC_BACKFILL", "1"),
     "GATE_CROSSEX_KEY": os.environ.get("GATE_CROSSEX_KEY", ""),
     "GATE_CROSSEX_SECRET": os.environ.get("GATE_CROSSEX_SECRET", ""),
 }
