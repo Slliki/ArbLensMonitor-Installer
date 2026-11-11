@@ -160,12 +160,18 @@ d["vars"] = {
 (p.parent / "wrangler.local.json").write_text(json.dumps(d, separators=(",", ":")))
 PY
 chmod 600 "$RELEASE/dist/server/wrangler.local.json"
+if [[ -f "$RELEASE/deploy/read-api-config.py" ]]; then
+  python3 "$RELEASE/deploy/read-api-config.py" --bind-only "$RELEASE/dist/server/wrangler.local.json"
+fi
 chown -R arblens:arblens "$RELEASE" "$DATA_ROOT"
 ln -sfn "$RELEASE" "$APP_ROOT/current"
 RELEASE_ACTIVATED=1
 
 install -d -m 700 -o root -g root /var/lib/arblens-updater
 install -m 755 -o root -g root "$RELEASE/deploy/updater.py" /usr/local/lib/arblens-updater.py
+if [[ -f "$RELEASE/deploy/read-api-config.py" ]]; then
+  install -m 755 -o root -g root "$RELEASE/deploy/read-api-config.py" /usr/local/lib/arblens-read-api-config.py
+fi
 NEW_UPDATE_KEY=0
 if [[ ! -s "$CONFIG_ROOT/update.key" ]] || [[ $(wc -c < "$CONFIG_ROOT/update.key") -lt 33 ]]; then
   (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(36))' > "$CONFIG_ROOT/update.key")
@@ -345,6 +351,8 @@ server {
     listen [::]:80 default_server;
     server_name $SERVER_NAME;
     client_max_body_size 2m;
+    # The dedicated read token is for SSH loopback access, not public HTTP.
+    location ~* ^/api/read(?:/|$) { return 404; }
     location ^~ /api/system/update/ {
         proxy_pass http://127.0.0.1:3031;
         proxy_http_version 1.1;
