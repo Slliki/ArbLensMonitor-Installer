@@ -60,7 +60,7 @@ umask 022
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl nginx tar xz-utils python3 >/dev/null
-if ! command -v node >/dev/null 2>&1 || [[ $(node -p 'Number(process.versions.node.split(".")[0])') -lt 22 ]]; then
+if ! command -v node >/dev/null 2>&1 || ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||a===22&&b>=13?0:1)'; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null
 fi
@@ -93,6 +93,7 @@ rollback_release() {
     echo "更新未完成，正在恢复上一代码版本……" >&2
     ln -sfn "$PREVIOUS_RELEASE" "$APP_ROOT/current"
     systemctl restart arblens-web arblens-monitor || true
+    if [[ -f "$PREVIOUS_RELEASE/deploy/news/server.mjs" ]]; then systemctl restart arblens-news || true; else systemctl stop arblens-news || true; fi
     if [[ -s "$UPDATER_BACKUP" && -s "$UPDATER_UNIT_BACKUP" ]]; then
       install -m 755 "$UPDATER_BACKUP" /usr/local/lib/arblens-updater.py
       install -m 644 "$UPDATER_UNIT_BACKUP" /etc/systemd/system/arblens-updater.service
@@ -136,8 +137,8 @@ mkdir -p "$RELEASE"
 tar -xzf "$ARCHIVE" -C "$RELEASE"
 cd "$RELEASE"
 printf '%s\n' "$RELEASE_TAG" > ARBLENS_VERSION
-npm ci --no-audit --no-fund
-npm run build
+[[ -f dist/server/index.js && -f dist/server/wrangler.json && -f dist/client/live.html && -f deploy/news/server.mjs ]] || { echo "运行包文件不完整。" >&2; exit 1; }
+npm ci --omit=dev --no-audit --no-fund
 
 # Preserve this token so rollback still matches the previous runtime config.
 MONITOR_TOKEN=""
@@ -344,6 +345,20 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Keep per-instance news credentials across upgrades.
+NEWS_ENV="$CONFIG_ROOT/news.env"
+if [[ ! -f "$NEWS_ENV" ]]; then
+  (umask 077
+   {
+     printf 'ARBLENS_NEWS_ENABLED=0\n'
+     printf 'ARBLENS_NEWS_WEB_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')"
+     printf 'ARBLENS_NEWS_MCP_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(36))')"
+     if [[ -n "$PUBLIC_DOMAIN" ]]; then printf 'ARBLENS_NEWS_SITE_URL=https://%s\n' "$PUBLIC_DOMAIN"; fi
+   } > "$NEWS_ENV")
+fi
+chmod 600 "$NEWS_ENV"
+install -m 644 "$RELEASE/deploy/news/arblens-news.service" /etc/systemd/system/arblens-news.service
+
 SERVER_NAME=${PUBLIC_DOMAIN:-_}
 cat > /etc/nginx/sites-available/arblens <<EOF
 server {
@@ -353,6 +368,17 @@ server {
     client_max_body_size 2m;
     # The dedicated read token is for SSH loopback access, not public HTTP.
     location ~* ^/api/read(?:/|$) { return 404; }
+    location = /api/monitor/news { return 404; }
+    location = /.well-known/oauth-protected-resource/api/news/mcp {
+        proxy_pass http://127.0.0.1:3032;
+    }
+    location ^~ /api/news/ {
+        proxy_pass http://127.0.0.1:3032;
+        proxy_http_version 1.1;
+        proxy_read_timeout 55s;
+        proxy_set_header Host \$host;
+        client_max_body_size 16k;
+    }
     location ^~ /api/system/update/ {
         proxy_pass http://127.0.0.1:3031;
         proxy_http_version 1.1;
@@ -380,6 +406,8 @@ nginx -t
 systemctl daemon-reload
 systemctl enable --now arblens-web arblens-monitor arblens-watchdog arblens-updater nginx
 systemctl restart arblens-web arblens-monitor arblens-watchdog arblens-updater nginx
+systemctl enable arblens-news
+systemctl restart arblens-news
 
 healthy() {
   curl -fsS --max-time 3 http://127.0.0.1:3000/api/health >/dev/null 2>&1 &&
@@ -397,6 +425,12 @@ if ! healthy; then
   echo "服务未能通过健康检查；已执行自动回滚。诊断命令：journalctl -u arblens-web -n 100 --no-pager" >&2
   exit 1
 fi
+
+for _ in $(seq 1 15); do
+  if curl -fsS --max-time 2 http://127.0.0.1:3032/api/news/health >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -fsS --max-time 2 http://127.0.0.1:3032/api/news/health >/dev/null
 
 # Keep only the two newest immutable releases. Persistent data is elsewhere.
 mapfile -t OLD_RELEASES < <(find "$APP_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2-)
