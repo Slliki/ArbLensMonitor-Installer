@@ -12,4 +12,6 @@ sudo bash install.sh
 
 已授权实例可以在 ArbLens 的「版本更新」页面检查并升级。开始升级仍需该实例原有的本机管理密钥。安装密钥轮换后，已授权的实例凭证可以继续使用。
 
+Agent 页需从 HTTPS 访问。实例管理员可在 Ubuntu 上运行 `sudo cat /etc/arblens/agent.env`，把 `ARBLENS_AGENT_TOKEN` 的值填入 Agent 页，再配置所选模型服务的 API Key。自管反向代理应在转发 `/api/news/` 时覆盖 `X-Forwarded-Proto`，使用实际访问协议。
+
 [最新安装入口](https://github.com/Slliki/ArbLensMonitor-Installer/releases/latest)
